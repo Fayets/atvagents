@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useTypewriter } from '../../hooks/useTypewriter'
 import { streamGenerate } from '../../utils/api'
 import { detectPhaseFromText } from '../../utils/phases'
 import {
@@ -32,6 +33,7 @@ export function GenerarTab() {
   const [generating, setGenerating] = useState(false)
   const [liveLogs, setLiveLogs] = useState([])
   const [accountMissing, setAccountMissing] = useState(() => !getActiveAccountId())
+  const typewriter = useTypewriter()
 
   const refreshLeads = useCallback(() => {
     setLeads(getLeadsIndex())
@@ -44,6 +46,10 @@ export function GenerarTab() {
     }
     setSelectedLead(getLead(selectedLeadId))
   }, [selectedLeadId, leads])
+
+  useEffect(() => {
+    typewriter.cancel()
+  }, [selectedLeadId, typewriter.cancel])
 
   function clearAttachments() {
     setAttachments((current) => {
@@ -106,6 +112,7 @@ export function GenerarTab() {
     setSelectedLead({ ...selectedLead, messages: baseMessages })
     setGenerating(true)
     setLiveLogs([])
+    typewriter.cancel()
 
     let accumulatedText = ''
     const logLines = []
@@ -139,11 +146,13 @@ export function GenerarTab() {
 
             if (event.type === 'text_chunk') {
               accumulatedText += event.value
-              showAssistant(accumulatedText)
+              if (!assistantVisible) showAssistant('')
+              typewriter.reveal(accumulatedText)
             }
 
             if (event.type === 'error') {
               streamFinished = true
+              typewriter.cancel()
               const errorMessage = {
                 role: 'assistant',
                 content: `No pude completar la solicitud.\n\n${event.detail || 'Error desconocido.'}`,
@@ -187,6 +196,7 @@ export function GenerarTab() {
         throw new Error('La conexión con el agente se interrumpió antes de completar la respuesta.')
       }
     } catch (err) {
+      typewriter.cancel()
       const errorText = err instanceof Error ? err.message : 'Error al generar el mensaje'
       const errorMessage = {
         role: 'assistant',
@@ -221,6 +231,7 @@ export function GenerarTab() {
         generating={generating}
         liveLogs={liveLogs}
         accountMissing={accountMissing}
+        typewriter={typewriter}
       />
       <PhaseTracker currentPhase={selectedLead?.phase ?? 1} />
     </div>

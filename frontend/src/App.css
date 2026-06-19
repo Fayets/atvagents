@@ -1034,6 +1034,26 @@
   min-height: 1.25rem;
 }
 
+.chat-bubble__content--typewriter {
+  white-space: pre-wrap;
+}
+
+.typewriter-cursor {
+  display: inline;
+  color: var(--atv-accent-content);
+  animation: typewriter-blink 1s step-end infinite;
+}
+
+@keyframes typewriter-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
 .chat-bubble__content b {
   color: var(--atv-accent-content);
   font-weight: 600;

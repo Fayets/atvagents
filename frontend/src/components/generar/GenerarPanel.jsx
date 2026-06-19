@@ -49,6 +49,7 @@ export function GenerarPanel({
   generating,
   liveLogs,
   accountMissing,
+  typewriter,
 }) {
   const bottomRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -57,7 +58,7 @@ export function GenerarPanel({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [selectedLead?.messages, generating, liveLogs])
+  }, [selectedLead?.messages, generating, liveLogs, typewriter?.visibleLength])
 
   function toggleLogs(index) {
     setExpandedLogIndexes((prev) => {
@@ -117,17 +118,33 @@ export function GenerarPanel({
             Pegá la conversación con el lead, adjuntá capturas, o ambas cosas.
           </p>
         )}
-        {selectedLead.messages.map((msg, index) => (
+        {selectedLead.messages.map((msg, index) => {
+          const isLastMessage = index === selectedLead.messages.length - 1
+          const showTypewriter =
+            msg.role === 'assistant' &&
+            isLastMessage &&
+            typewriter?.active
+
+          return (
           <div key={`${msg.role}-${index}`} className="generar-panel__message-group">
-            {(msg.role !== 'assistant' || msg.streaming || msg.content) && (
+            {(msg.role !== 'assistant' || msg.streaming || msg.content || showTypewriter) && (
               <div
                 className={`chat-bubble chat-bubble--${msg.role}${msg.streaming ? ' chat-bubble--streaming' : ''}`}
               >
                 {msg.role === 'assistant' ? (
-                  <div
-                    className="chat-bubble__content"
-                    dangerouslySetInnerHTML={{ __html: renderBoldMarkdown(msg.content) }}
-                  />
+                  showTypewriter ? (
+                    <div className="chat-bubble__content chat-bubble__content--typewriter">
+                      <span className="chat-bubble__text">{typewriter.visibleText}</span>
+                      <span className="typewriter-cursor" aria-hidden="true">
+                        ▍
+                      </span>
+                    </div>
+                  ) : (
+                    <div
+                      className="chat-bubble__content"
+                      dangerouslySetInnerHTML={{ __html: renderBoldMarkdown(msg.content) }}
+                    />
+                  )
                 ) : (
                   <UserMessageContent content={msg.content} images={msg.images} />
                 )}
@@ -149,7 +166,8 @@ export function GenerarPanel({
               </div>
             )}
           </div>
-        ))}
+          )
+        })}
         <div ref={bottomRef} />
       </div>
       <form
