@@ -114,9 +114,12 @@ export function GenerarPanel({
     <section className="generar-panel">
       <div className="generar-panel__messages">
         {selectedLead.messages.length === 0 && !generating && (
-          <p className="generar-panel__hint">
-            Pegá la conversación con el lead, adjuntá capturas, o ambas cosas.
-          </p>
+          <div className="generar-panel__empty-state">
+            <p className="generar-panel__empty-title">Empezá a chatear con el Setter</p>
+            <p className="generar-panel__empty-text">
+              Contale la situación del lead con tus palabras, como si le estuvieras escribiendo a un compañero de equipo. Él se acuerda de todo lo que ya hablaron.
+            </p>
+          </div>
         )}
         {selectedLead.messages.map((msg, index) => {
           const isLastMessage = index === selectedLead.messages.length - 1
@@ -185,7 +188,7 @@ export function GenerarPanel({
         <textarea
           className="generar-panel__input"
           rows={3}
-          placeholder="Pegá el transcript de la conversación…"
+          placeholder="Escribile al Setter como si fuera un chat. Contale lo que pasó o pegale el último mensaje del lead, y va a recordar todo lo que ya hablaron en esta conversación."
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
           disabled={generating}
