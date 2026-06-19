@@ -25,6 +25,7 @@ def list_accounts():
 async def generate(
     agent: str = Form(...),
     account_id: str = Form(...),
+    lead_id: int = Form(...),
     lead_context: str = Form(""),
     session_id: str | None = Form(None),
     images: list[UploadFile] = File(default=[]),
@@ -48,6 +49,7 @@ async def generate(
         run = await service.prepare_generation(
             agent=agent,
             account_id=account_id,
+            lead_id=lead_id,
             lead_context=lead_context,
             session_id=session_id or None,
             images=uploads or None,

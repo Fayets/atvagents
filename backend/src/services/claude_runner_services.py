@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile
 
 from src.schemas import AccountInfo
+from src.services.leads_services import LeadsServices
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,13 @@ class GenerationRun:
     command: list[str]
     cwd: str
     env: dict[str, str]
+    lead_id: int
+    user_content: str = ""
 
 
 class ClaudeRunnerServices:
+    def __init__(self) -> None:
+        self.leads_service = LeadsServices()
     def list_accounts(self) -> list[AccountInfo]:
         if not ACCOUNTS_DIR.is_dir():
             return []
@@ -58,6 +63,7 @@ class ClaudeRunnerServices:
         self,
         agent: str,
         account_id: str,
+        lead_id: int,
         lead_context: str,
         session_id: str | None = None,
         images: list[UploadFile] | None = None,
@@ -83,6 +89,8 @@ class ClaudeRunnerServices:
             command=self._build_command(final_context, session_id),
             cwd=str(agent_dir.resolve()),
             env=env,
+            lead_id=lead_id,
+            user_content=lead_context,
         )
 
     async def stream_generation(self, run: GenerationRun) -> AsyncIterator[str]:
@@ -90,6 +98,8 @@ class ClaudeRunnerServices:
         session_id: str | None = None
         text_chunks_received = False
         seen_logs: set[str] = set()
+        accumulated_text = ""
+        log_lines: list[str] = []
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -149,6 +159,7 @@ class ClaudeRunnerServices:
                             and not text_chunks_received
                         ):
                             text_chunks_received = True
+                            accumulated_text += result_text
                             yield self._sse({"type": "text_chunk", "value": result_text})
                         continue
 
@@ -157,8 +168,10 @@ class ClaudeRunnerServices:
                             if payload["value"] in seen_logs:
                                 continue
                             seen_logs.add(payload["value"])
+                            log_lines.append(payload["value"])
                         if payload["type"] == "text_chunk":
                             text_chunks_received = True
+                            accumulated_text += payload["value"]
                         yield self._sse(payload)
 
                 return_code = await process.wait()
@@ -190,6 +203,17 @@ class ClaudeRunnerServices:
             logger.error("No text chunks received from claude stream")
             yield self._sse({"type": "error", "detail": GENERIC_AGENT_ERROR})
             return
+
+        try:
+            self.leads_service.save_generation_result(
+                lead_id=run.lead_id,
+                user_content=run.user_content,
+                assistant_content=accumulated_text,
+                logs=log_lines,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.exception("Failed to persist generation result for lead %s", run.lead_id)
 
         yield self._sse(
             {
