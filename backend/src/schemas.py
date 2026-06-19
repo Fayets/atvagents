@@ -9,7 +9,7 @@ class AccountInfo(BaseModel):
 class GenerateRequest(BaseModel):
     agent: str
     account_id: str
-    lead_context: str
+    lead_context: str = ""
     session_id: str | None = None
 
 

@@ -11,3 +11,4 @@ frontend/dist/
 
 # Sistema
 .DS_Store
+frontend/.env.development

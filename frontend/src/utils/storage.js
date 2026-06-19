@@ -69,13 +69,14 @@ export function createLead(name) {
   return lead
 }
 
-export function updateLeadMessages(id, messages, phase) {
+export function updateLeadMessages(id, messages, phase, sessionId) {
   const lead = getLead(id)
   if (!lead) return null
   const updated = {
     ...lead,
     messages,
     phase: phase ?? lead.phase,
+    sessionId: sessionId !== undefined ? sessionId : lead.sessionId,
     lastContact: new Date().toISOString(),
   }
   saveLead(updated)

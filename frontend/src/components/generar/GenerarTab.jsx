@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { generateMessage, MOCK_GENERATION_LOG_STEPS } from '../../utils/generateMessage'
+import { MOCK_GENERATION_LOG_STEPS, postGenerate } from '../../utils/api'
 import { animateGenerationLogs } from '../../utils/generarLogs'
 import { detectPhaseFromText } from '../../utils/phases'
 import {
@@ -13,11 +13,23 @@ import { LeadsPanel } from '../chatbot/LeadsPanel'
 import { PhaseTracker } from '../chatbot/PhaseTracker'
 import { GenerarPanel } from './GenerarPanel'
 
+const AGENT_ID = 'setter'
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
 export function GenerarTab() {
   const [leads, setLeads] = useState(() => getLeadsIndex())
   const [selectedLeadId, setSelectedLeadId] = useState(null)
   const [selectedLead, setSelectedLead] = useState(null)
   const [draft, setDraft] = useState('')
+  const [attachments, setAttachments] = useState([])
   const [generating, setGenerating] = useState(false)
   const [liveLogs, setLiveLogs] = useState([])
   const [accountMissing, setAccountMissing] = useState(() => !getActiveAccountId())
@@ -34,9 +46,17 @@ export function GenerarTab() {
     setSelectedLead(getLead(selectedLeadId))
   }, [selectedLeadId, leads])
 
+  function clearAttachments() {
+    setAttachments((current) => {
+      current.forEach((item) => URL.revokeObjectURL(item.previewUrl))
+      return []
+    })
+  }
+
   function handleSelectLead(id) {
     setSelectedLeadId(id)
     setDraft('')
+    clearAttachments()
   }
 
   function handleCreateLead(name) {
@@ -44,11 +64,14 @@ export function GenerarTab() {
     refreshLeads()
     setSelectedLeadId(lead.id)
     setSelectedLead(lead)
+    setDraft('')
+    clearAttachments()
   }
 
   async function handleGenerate() {
     const trimmed = draft.trim()
-    if (!trimmed || generating) return
+    const hasImages = attachments.length > 0
+    if ((!trimmed && !hasImages) || generating) return
 
     const accountId = getActiveAccountId()
     if (!accountId) {
@@ -59,10 +82,17 @@ export function GenerarTab() {
 
     if (!selectedLead) return
 
-    const userMessage = { role: 'user', content: trimmed }
+    const imageDataUrls = hasImages
+      ? await Promise.all(attachments.map((item) => readFileAsDataUrl(item.file)))
+      : []
+
+    const userMessage = {
+      role: 'user',
+      content: trimmed,
+      ...(imageDataUrls.length > 0 ? { images: imageDataUrls } : {}),
+    }
     const nextMessages = [...selectedLead.messages, userMessage]
     setSelectedLead({ ...selectedLead, messages: nextMessages })
-    setDraft('')
     setGenerating(true)
     setLiveLogs([])
 
@@ -77,15 +107,13 @@ export function GenerarTab() {
     try {
       const [, result] = await Promise.all([
         animationPromise,
-        generateMessage(
-          {
-            leadId: selectedLead.id,
-            leadName: selectedLead.name,
-            messages: selectedLead.messages,
-            userMessage: trimmed,
-          },
+        postGenerate({
+          agent: AGENT_ID,
           accountId,
-        ),
+          leadContext: trimmed,
+          sessionId: selectedLead.sessionId || null,
+          images: attachments.map((item) => item.file),
+        }),
       ])
 
       const assistantMessage = {
@@ -94,14 +122,17 @@ export function GenerarTab() {
         logs: [...logLines],
       }
       const fullMessages = [...nextMessages, assistantMessage]
-      const detectedPhase = result.fase ?? detectPhaseFromText(result.reply)
+      const detectedPhase = detectPhaseFromText(result.reply)
       const updated = updateLeadMessages(
         selectedLead.id,
         fullMessages,
         detectedPhase ?? selectedLead.phase,
+        result.session_id,
       )
       setSelectedLead(updated)
       refreshLeads()
+      setDraft('')
+      clearAttachments()
     } catch (err) {
       const errorText = err instanceof Error ? err.message : 'Error al generar el mensaje'
       const errorMessage = {
@@ -131,6 +162,8 @@ export function GenerarTab() {
         selectedLead={selectedLead}
         draft={draft}
         onDraftChange={setDraft}
+        attachments={attachments}
+        onAttachmentsChange={setAttachments}
         onGenerate={handleGenerate}
         generating={generating}
         liveLogs={liveLogs}

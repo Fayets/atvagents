@@ -5,7 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 
 from src.schemas import AccountInfo, GenerateResponse
 
@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ACCOUNTS_DIR = BACKEND_ROOT / "accounts"
 CONTENT_DIR = BACKEND_ROOT / "content"
+
+ALLOWED_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
 
 
 class ClaudeRunnerServices:
@@ -33,12 +39,13 @@ class ClaudeRunnerServices:
             )
         return accounts
 
-    def run_generation(
+    async def run_generation(
         self,
         agent: str,
         account_id: str,
         lead_context: str,
         session_id: str | None = None,
+        images: list[UploadFile] | None = None,
     ) -> GenerateResponse:
         agent_dir = CONTENT_DIR / agent
         if not agent_dir.is_dir():
@@ -48,10 +55,12 @@ class ClaudeRunnerServices:
         if not account_dir.is_dir():
             raise HTTPException(status_code=404, detail=f"No existe la cuenta '{account_id}'.")
 
+        final_context = await self._build_lead_context(agent_dir, lead_context, images)
+
         env = os.environ.copy()
         env["CLAUDE_CONFIG_DIR"] = str(account_dir.resolve())
 
-        command = self._build_command(lead_context, session_id)
+        command = self._build_command(final_context, session_id)
 
         started = time.time()
         try:
@@ -107,6 +116,41 @@ class ClaudeRunnerServices:
             duration_ms=duration_ms,
             session_id=parsed_session_id,
         )
+
+    async def _build_lead_context(
+        self,
+        agent_dir: Path,
+        lead_context: str,
+        images: list[UploadFile] | None,
+    ) -> str:
+        saved_paths: list[str] = []
+        uploads = images or []
+
+        if uploads:
+            upload_dir = agent_dir / "uploads" / str(int(time.time() * 1000))
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            for index, image in enumerate(uploads, start=1):
+                ext = ALLOWED_IMAGE_EXTENSIONS.get(image.content_type or "")
+                if not ext:
+                    ext = Path(image.filename or "").suffix.lower() or ".png"
+                filename = f"captura_{index}{ext}"
+                dest = upload_dir / filename
+                dest.write_bytes(await image.read())
+                saved_paths.append(str(dest.resolve()))
+
+        parts: list[str] = []
+        text = lead_context.strip()
+        if text:
+            parts.append(text)
+        if saved_paths:
+            paths_line = ", ".join(saved_paths)
+            parts.append(
+                "Tenés capturas de la conversación adjuntas en estas rutas, "
+                f"leelas con la herramienta Read antes de responder: {paths_line}"
+            )
+
+        return "\n\n".join(parts)
 
     @staticmethod
     def _build_command(lead_context: str, session_id: str | None) -> list[str]:
