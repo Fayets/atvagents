@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { renderBoldMarkdown } from '../../utils/markdown'
 
 const MAX_IMAGES = 6
@@ -39,6 +39,8 @@ function UserMessageContent({ content, images }) {
   )
 }
 
+const MAX_TEXTAREA_HEIGHT = 200
+
 export function GenerarPanel({
   selectedLead,
   draft,
@@ -53,8 +55,22 @@ export function GenerarPanel({
 }) {
   const bottomRef = useRef(null)
   const fileInputRef = useRef(null)
+  const textareaRef = useRef(null)
   const [expandedLogIndexes, setExpandedLogIndexes] = useState(() => new Set())
   const canGenerate = Boolean(draft.trim()) || attachments.length > 0
+
+  const resizeTextarea = useCallback(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    const nextHeight = Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT)
+    el.style.height = `${nextHeight}px`
+    el.style.overflowY = el.scrollHeight > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden'
+  }, [])
+
+  useEffect(() => {
+    resizeTextarea()
+  }, [draft, resizeTextarea])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -186,11 +202,15 @@ export function GenerarPanel({
           </p>
         )}
         <textarea
+          ref={textareaRef}
           className="generar-panel__input"
-          rows={3}
+          rows={1}
           placeholder="Escribile al Setter como si fuera un chat. Contale lo que pasó o pegale el último mensaje del lead, y va a recordar todo lo que ya hablaron en esta conversación."
           value={draft}
-          onChange={(e) => onDraftChange(e.target.value)}
+          onChange={(e) => {
+            onDraftChange(e.target.value)
+          }}
+          onInput={resizeTextarea}
           disabled={generating}
         />
         <div
