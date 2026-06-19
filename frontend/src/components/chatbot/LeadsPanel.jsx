@@ -34,9 +34,9 @@ export function LeadsPanel({ leads, selectedLeadId, onSelectLead, onCreateLead }
               className={`leads-panel__item${selectedLeadId === lead.id ? ' leads-panel__item--active' : ''}`}
               onClick={() => onSelectLead(lead.id)}
             >
-              <span className="leads-panel__name">{lead.name}</span>
-              <span className="leads-panel__meta">Fase {lead.phase ?? 1}</span>
-              <span className="leads-panel__date">{formatDate(lead.lastContact)}</span>
+              <span className="leads-panel__name">{lead.nombre}</span>
+              <span className="leads-panel__meta">Fase {lead.fase ?? 1}</span>
+              <span className="leads-panel__date">{formatDate(lead.actualizado)}</span>
             </button>
           </li>
         ))}

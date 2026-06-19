@@ -1,19 +1,28 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTypewriter } from '../../hooks/useTypewriter'
-import { streamGenerate } from '../../utils/api'
+import { createLead, fetchLead, fetchLeads, streamGenerate } from '../../utils/api'
 import { detectPhaseFromText } from '../../utils/phases'
-import {
-  createLead,
-  getActiveAccountId,
-  getLead,
-  getLeadsIndex,
-  updateLeadMessages,
-} from '../../utils/storage'
+import { getActiveAccountId } from '../../utils/storage'
 import { LeadsPanel } from '../chatbot/LeadsPanel'
 import { PhaseTracker } from '../chatbot/PhaseTracker'
 import { GenerarPanel } from './GenerarPanel'
 
 const AGENT_ID = 'setter'
+
+function mapLeadFromApi(lead) {
+  return {
+    id: lead.id,
+    name: lead.nombre,
+    phase: lead.fase || 1,
+    sessionId: lead.session_id || null,
+    lastContact: lead.actualizado,
+    messages: (lead.mensajes || []).map((msg) => ({
+      role: msg.role,
+      content: msg.contenido,
+      logs: msg.logs ?? undefined,
+    })),
+  }
+}
 
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -25,7 +34,7 @@ function readFileAsDataUrl(file) {
 }
 
 export function GenerarTab() {
-  const [leads, setLeads] = useState(() => getLeadsIndex())
+  const [leads, setLeads] = useState([])
   const [selectedLeadId, setSelectedLeadId] = useState(null)
   const [selectedLead, setSelectedLead] = useState(null)
   const [draft, setDraft] = useState('')
@@ -35,17 +44,16 @@ export function GenerarTab() {
   const [accountMissing, setAccountMissing] = useState(() => !getActiveAccountId())
   const typewriter = useTypewriter()
 
-  const refreshLeads = useCallback(() => {
-    setLeads(getLeadsIndex())
+  const loadLeads = useCallback(async () => {
+    const data = await fetchLeads(AGENT_ID)
+    setLeads(data)
   }, [])
 
   useEffect(() => {
-    if (!selectedLeadId) {
-      setSelectedLead(null)
-      return
-    }
-    setSelectedLead(getLead(selectedLeadId))
-  }, [selectedLeadId, leads])
+    loadLeads().catch(() => {
+      setLeads([])
+    })
+  }, [loadLeads])
 
   useEffect(() => {
     typewriter.cancel()
@@ -58,19 +66,31 @@ export function GenerarTab() {
     })
   }
 
-  function handleSelectLead(id) {
+  async function handleSelectLead(id) {
     setSelectedLeadId(id)
+    setSelectedLead(null)
     setDraft('')
     clearAttachments()
+
+    try {
+      const lead = await fetchLead(id)
+      setSelectedLead(mapLeadFromApi(lead))
+    } catch {
+      setSelectedLead(null)
+    }
   }
 
-  function handleCreateLead(name) {
-    const lead = createLead(name)
-    refreshLeads()
-    setSelectedLeadId(lead.id)
-    setSelectedLead(lead)
-    setDraft('')
-    clearAttachments()
+  async function handleCreateLead(name) {
+    try {
+      const lead = await createLead({ agent: AGENT_ID, nombre: name })
+      setLeads((current) => [lead, ...current])
+      setSelectedLeadId(lead.id)
+      setSelectedLead(mapLeadFromApi({ ...lead, mensajes: [] }))
+      setDraft('')
+      clearAttachments()
+    } catch {
+      window.alert('No se pudo crear el lead. Intentá de nuevo.')
+    }
   }
 
   function upsertStreamingAssistant(messages, content, streaming) {
@@ -118,6 +138,7 @@ export function GenerarTab() {
     const logLines = []
     let assistantVisible = false
     let streamFinished = false
+    const activeLeadId = selectedLead.id
 
     function showAssistant(content) {
       assistantVisible = true
@@ -132,6 +153,7 @@ export function GenerarTab() {
         {
           agent: AGENT_ID,
           accountId,
+          leadId: activeLeadId,
           leadContext: trimmed,
           sessionId: selectedLead.sessionId || null,
           images: attachments.map((item) => item.file),
@@ -158,14 +180,10 @@ export function GenerarTab() {
                 content: `No pude completar la solicitud.\n\n${event.detail || 'Error desconocido.'}`,
                 logs: logLines.length > 0 ? [...logLines] : undefined,
               }
-              const fullMessages = [...baseMessages, errorMessage]
-              const updated = updateLeadMessages(
-                selectedLead.id,
-                fullMessages,
-                selectedLead.phase,
-              )
-              setSelectedLead(updated)
-              refreshLeads()
+              setSelectedLead((prev) => ({
+                ...prev,
+                messages: [...baseMessages, errorMessage],
+              }))
             }
 
             if (event.type === 'done') {
@@ -175,16 +193,28 @@ export function GenerarTab() {
                 content: accumulatedText,
                 logs: logLines.length > 0 ? [...logLines] : undefined,
               }
-              const fullMessages = [...baseMessages, assistantMessage]
               const detectedPhase = detectPhaseFromText(accumulatedText)
-              const updated = updateLeadMessages(
-                selectedLead.id,
-                fullMessages,
-                detectedPhase ?? selectedLead.phase,
-                event.session_id,
+              const updatedAt = new Date().toISOString()
+
+              setSelectedLead((prev) => ({
+                ...prev,
+                messages: [...baseMessages, assistantMessage],
+                sessionId: event.session_id,
+                phase: detectedPhase ?? prev.phase,
+              }))
+
+              setLeads((prev) =>
+                prev.map((lead) =>
+                  lead.id === activeLeadId
+                    ? {
+                        ...lead,
+                        fase: detectedPhase ?? lead.fase,
+                        actualizado: updatedAt,
+                      }
+                    : lead,
+                ),
               )
-              setSelectedLead(updated)
-              refreshLeads()
+
               setDraft('')
               clearAttachments()
             }
@@ -203,10 +233,10 @@ export function GenerarTab() {
         content: `No pude completar la solicitud.\n\n${errorText}`,
         logs: logLines.length > 0 ? [...logLines] : undefined,
       }
-      const fullMessages = [...baseMessages, errorMessage]
-      const updated = updateLeadMessages(selectedLead.id, fullMessages, selectedLead.phase)
-      setSelectedLead(updated)
-      refreshLeads()
+      setSelectedLead((prev) => ({
+        ...prev,
+        messages: [...baseMessages, errorMessage],
+      }))
     } finally {
       setGenerating(false)
       setLiveLogs([])
