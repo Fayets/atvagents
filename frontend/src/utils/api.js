@@ -1,14 +1,32 @@
-import { MOCK_GENERATION_LOG_STEPS } from './generateMessage'
-
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-export async function postGenerate({
-  agent,
-  accountId,
-  leadContext,
-  sessionId,
-  images,
-}) {
+function parseSseBuffer(buffer) {
+  const events = []
+  const blocks = buffer.split('\n\n')
+  const remainder = blocks.pop() ?? ''
+
+  for (const block of blocks) {
+    const dataLine = block
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('data:'))
+
+    if (!dataLine) continue
+
+    try {
+      events.push(JSON.parse(dataLine.slice(5).trim()))
+    } catch {
+      // ignore malformed chunks
+    }
+  }
+
+  return { events, remainder }
+}
+
+export async function streamGenerate(
+  { agent, accountId, leadContext, sessionId, images },
+  { onEvent },
+) {
   const formData = new FormData()
   formData.append('agent', agent)
   formData.append('account_id', accountId)
@@ -38,7 +56,27 @@ export async function postGenerate({
     throw new Error(detail)
   }
 
-  return response.json()
-}
+  if (!response.body) {
+    throw new Error('El servidor no devolvió un stream de respuesta.')
+  }
 
-export { MOCK_GENERATION_LOG_STEPS }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const { events, remainder } = parseSseBuffer(buffer)
+    buffer = remainder
+
+    for (const event of events) {
+      onEvent(event)
+      if (event.type === 'done' || event.type === 'error') {
+        return
+      }
+    }
+  }
+}

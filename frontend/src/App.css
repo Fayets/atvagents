@@ -1030,6 +1030,10 @@
   box-shadow: var(--atv-shadow);
 }
 
+.chat-bubble--streaming .chat-bubble__content {
+  min-height: 1.25rem;
+}
+
 .chat-bubble__content b {
   color: var(--atv-accent-content);
   font-weight: 600;

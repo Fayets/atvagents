@@ -119,17 +119,24 @@ export function GenerarPanel({
         )}
         {selectedLead.messages.map((msg, index) => (
           <div key={`${msg.role}-${index}`} className="generar-panel__message-group">
-            <div className={`chat-bubble chat-bubble--${msg.role}`}>
-              {msg.role === 'assistant' ? (
-                <div
-                  className="chat-bubble__content"
-                  dangerouslySetInnerHTML={{ __html: renderBoldMarkdown(msg.content) }}
-                />
-              ) : (
-                <UserMessageContent content={msg.content} images={msg.images} />
-              )}
-            </div>
-            {msg.role === 'assistant' && msg.logs?.length > 0 && (
+            {(msg.role !== 'assistant' || msg.streaming || msg.content) && (
+              <div
+                className={`chat-bubble chat-bubble--${msg.role}${msg.streaming ? ' chat-bubble--streaming' : ''}`}
+              >
+                {msg.role === 'assistant' ? (
+                  <div
+                    className="chat-bubble__content"
+                    dangerouslySetInnerHTML={{ __html: renderBoldMarkdown(msg.content) }}
+                  />
+                ) : (
+                  <UserMessageContent content={msg.content} images={msg.images} />
+                )}
+              </div>
+            )}
+            {msg.role === 'assistant' && msg.streaming && liveLogs.length > 0 && (
+              <LogConsole lines={liveLogs} />
+            )}
+            {msg.role === 'assistant' && !msg.streaming && msg.logs?.length > 0 && (
               <div className="generar-logs-toggle">
                 <button
                   type="button"
@@ -143,7 +150,6 @@ export function GenerarPanel({
             )}
           </div>
         ))}
-        {generating && liveLogs.length > 0 && <LogConsole lines={liveLogs} />}
         <div ref={bottomRef} />
       </div>
       <form

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { MOCK_GENERATION_LOG_STEPS, postGenerate } from '../../utils/api'
-import { animateGenerationLogs } from '../../utils/generarLogs'
+import { streamGenerate } from '../../utils/api'
 import { detectPhaseFromText } from '../../utils/phases'
 import {
   createLead,
@@ -68,6 +67,17 @@ export function GenerarTab() {
     clearAttachments()
   }
 
+  function upsertStreamingAssistant(messages, content, streaming) {
+    const last = messages[messages.length - 1]
+    if (last?.role === 'assistant' && last.streaming) {
+      return [
+        ...messages.slice(0, -1),
+        { ...last, content, streaming },
+      ]
+    }
+    return [...messages, { role: 'assistant', content, streaming: true }]
+  }
+
   async function handleGenerate() {
     const trimmed = draft.trim()
     const hasImages = attachments.length > 0
@@ -91,48 +101,91 @@ export function GenerarTab() {
       content: trimmed,
       ...(imageDataUrls.length > 0 ? { images: imageDataUrls } : {}),
     }
-    const nextMessages = [...selectedLead.messages, userMessage]
-    setSelectedLead({ ...selectedLead, messages: nextMessages })
+    const baseMessages = [...selectedLead.messages, userMessage]
+
+    setSelectedLead({ ...selectedLead, messages: baseMessages })
     setGenerating(true)
     setLiveLogs([])
 
+    let accumulatedText = ''
     const logLines = []
-    const steps = MOCK_GENERATION_LOG_STEPS
+    let assistantVisible = false
+    let streamFinished = false
 
-    const animationPromise = animateGenerationLogs(steps, (line) => {
-      logLines.push(line)
-      setLiveLogs([...logLines])
-    })
+    function showAssistant(content) {
+      assistantVisible = true
+      setSelectedLead((prev) => ({
+        ...prev,
+        messages: upsertStreamingAssistant(prev.messages, content, true),
+      }))
+    }
 
     try {
-      const [, result] = await Promise.all([
-        animationPromise,
-        postGenerate({
+      await streamGenerate(
+        {
           agent: AGENT_ID,
           accountId,
           leadContext: trimmed,
           sessionId: selectedLead.sessionId || null,
           images: attachments.map((item) => item.file),
-        }),
-      ])
+        },
+        {
+          onEvent(event) {
+            if (event.type === 'log') {
+              logLines.push(event.value)
+              setLiveLogs([...logLines])
+              if (!assistantVisible) showAssistant('')
+            }
 
-      const assistantMessage = {
-        role: 'assistant',
-        content: result.reply,
-        logs: [...logLines],
-      }
-      const fullMessages = [...nextMessages, assistantMessage]
-      const detectedPhase = detectPhaseFromText(result.reply)
-      const updated = updateLeadMessages(
-        selectedLead.id,
-        fullMessages,
-        detectedPhase ?? selectedLead.phase,
-        result.session_id,
+            if (event.type === 'text_chunk') {
+              accumulatedText += event.value
+              showAssistant(accumulatedText)
+            }
+
+            if (event.type === 'error') {
+              streamFinished = true
+              const errorMessage = {
+                role: 'assistant',
+                content: `No pude completar la solicitud.\n\n${event.detail || 'Error desconocido.'}`,
+                logs: logLines.length > 0 ? [...logLines] : undefined,
+              }
+              const fullMessages = [...baseMessages, errorMessage]
+              const updated = updateLeadMessages(
+                selectedLead.id,
+                fullMessages,
+                selectedLead.phase,
+              )
+              setSelectedLead(updated)
+              refreshLeads()
+            }
+
+            if (event.type === 'done') {
+              streamFinished = true
+              const assistantMessage = {
+                role: 'assistant',
+                content: accumulatedText,
+                logs: logLines.length > 0 ? [...logLines] : undefined,
+              }
+              const fullMessages = [...baseMessages, assistantMessage]
+              const detectedPhase = detectPhaseFromText(accumulatedText)
+              const updated = updateLeadMessages(
+                selectedLead.id,
+                fullMessages,
+                detectedPhase ?? selectedLead.phase,
+                event.session_id,
+              )
+              setSelectedLead(updated)
+              refreshLeads()
+              setDraft('')
+              clearAttachments()
+            }
+          },
+        },
       )
-      setSelectedLead(updated)
-      refreshLeads()
-      setDraft('')
-      clearAttachments()
+
+      if (!streamFinished) {
+        throw new Error('La conexión con el agente se interrumpió antes de completar la respuesta.')
+      }
     } catch (err) {
       const errorText = err instanceof Error ? err.message : 'Error al generar el mensaje'
       const errorMessage = {
@@ -140,7 +193,7 @@ export function GenerarTab() {
         content: `No pude completar la solicitud.\n\n${errorText}`,
         logs: logLines.length > 0 ? [...logLines] : undefined,
       }
-      const fullMessages = [...nextMessages, errorMessage]
+      const fullMessages = [...baseMessages, errorMessage]
       const updated = updateLeadMessages(selectedLead.id, fullMessages, selectedLead.phase)
       setSelectedLead(updated)
       refreshLeads()

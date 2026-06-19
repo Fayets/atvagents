@@ -1,6 +1,7 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
-from src.schemas import AccountInfo, GenerateResponse
+from src.schemas import AccountInfo
 from src.services.claude_runner_services import ClaudeRunnerServices
 
 router = APIRouter(prefix="/api")
@@ -20,7 +21,7 @@ def list_accounts():
         raise HTTPException(status_code=500, detail="Error al listar cuentas.")
 
 
-@router.post("/generate", response_model=GenerateResponse)
+@router.post("/generate")
 async def generate(
     agent: str = Form(...),
     account_id: str = Form(...),
@@ -44,12 +45,16 @@ async def generate(
             )
 
     try:
-        return await service.run_generation(
+        run = await service.prepare_generation(
             agent=agent,
             account_id=account_id,
             lead_context=lead_context,
             session_id=session_id or None,
             images=uploads or None,
+        )
+        return StreamingResponse(
+            service.stream_generation(run),
+            media_type="text/event-stream",
         )
     except HTTPException as e:
         raise e

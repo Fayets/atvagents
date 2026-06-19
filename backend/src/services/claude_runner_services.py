@@ -1,25 +1,40 @@
+import asyncio
 import json
 import logging
 import os
-import subprocess
+import shutil
 import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
-from src.schemas import AccountInfo, GenerateResponse
+from src.schemas import AccountInfo
 
 logger = logging.getLogger(__name__)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ACCOUNTS_DIR = BACKEND_ROOT / "accounts"
 CONTENT_DIR = BACKEND_ROOT / "content"
+PROCESS_TIMEOUT_SECONDS = 120
 
 ALLOWED_IMAGE_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
 }
+
+GENERIC_AGENT_ERROR = (
+    "Error al ejecutar el agente. Revisá que la cuenta esté logueada correctamente."
+)
+
+
+@dataclass
+class GenerationRun:
+    command: list[str]
+    cwd: str
+    env: dict[str, str]
 
 
 class ClaudeRunnerServices:
@@ -39,14 +54,14 @@ class ClaudeRunnerServices:
             )
         return accounts
 
-    async def run_generation(
+    async def prepare_generation(
         self,
         agent: str,
         account_id: str,
         lead_context: str,
         session_id: str | None = None,
         images: list[UploadFile] | None = None,
-    ) -> GenerateResponse:
+    ) -> GenerationRun:
         agent_dir = CONTENT_DIR / agent
         if not agent_dir.is_dir():
             raise HTTPException(status_code=404, detail=f"No existe el agente '{agent}'.")
@@ -55,66 +70,133 @@ class ClaudeRunnerServices:
         if not account_dir.is_dir():
             raise HTTPException(status_code=404, detail=f"No existe la cuenta '{account_id}'.")
 
+        if not shutil.which("claude"):
+            logger.error("claude binary not found in PATH")
+            raise HTTPException(status_code=500, detail=GENERIC_AGENT_ERROR)
+
         final_context = await self._build_lead_context(agent_dir, lead_context, images)
 
         env = os.environ.copy()
         env["CLAUDE_CONFIG_DIR"] = str(account_dir.resolve())
 
-        command = self._build_command(final_context, session_id)
+        return GenerationRun(
+            command=self._build_command(final_context, session_id),
+            cwd=str(agent_dir.resolve()),
+            env=env,
+        )
 
+    async def stream_generation(self, run: GenerationRun) -> AsyncIterator[str]:
         started = time.time()
+        session_id: str | None = None
+        text_chunks_received = False
+        seen_logs: set[str] = set()
+
         try:
-            completed = subprocess.run(
-                command,
-                cwd=str(agent_dir.resolve()),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=120,
+            process = await asyncio.create_subprocess_exec(
+                *run.command,
+                cwd=run.cwd,
+                env=run.env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError:
             logger.error("claude binary not found in PATH")
-            raise HTTPException(
-                status_code=500,
-                detail="Error al ejecutar el agente. Revisá que la cuenta esté logueada correctamente.",
+            yield self._sse({"type": "error", "detail": GENERIC_AGENT_ERROR})
+            return
+
+        try:
+            async with asyncio.timeout(PROCESS_TIMEOUT_SECONDS):
+                assert process.stdout is not None
+                while True:
+                    raw_line = await process.stdout.readline()
+                    if not raw_line:
+                        break
+
+                    line = raw_line.decode(errors="replace").strip()
+                    if not line:
+                        continue
+
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    event_session_id = event.get("session_id")
+                    if isinstance(event_session_id, str) and event_session_id.strip():
+                        session_id = event_session_id
+
+                    event_type = event.get("type")
+
+                    if event_type == "result":
+                        if event.get("is_error"):
+                            logger.error(
+                                "claude result error stderr=%s",
+                                (await self._read_stderr(process)) if process.stderr else "",
+                            )
+                            yield self._sse(
+                                {
+                                    "type": "error",
+                                    "detail": GENERIC_AGENT_ERROR,
+                                }
+                            )
+                            await self._terminate_process(process)
+                            return
+
+                        result_text = event.get("result")
+                        if (
+                            isinstance(result_text, str)
+                            and result_text.strip()
+                            and not text_chunks_received
+                        ):
+                            text_chunks_received = True
+                            yield self._sse({"type": "text_chunk", "value": result_text})
+                        continue
+
+                    for payload in self._events_from_ndjson_event(event):
+                        if payload["type"] == "log":
+                            if payload["value"] in seen_logs:
+                                continue
+                            seen_logs.add(payload["value"])
+                        if payload["type"] == "text_chunk":
+                            text_chunks_received = True
+                        yield self._sse(payload)
+
+                return_code = await process.wait()
+        except TimeoutError:
+            logger.error("claude subprocess timed out after %ss", PROCESS_TIMEOUT_SECONDS)
+            await self._terminate_process(process)
+            yield self._sse(
+                {
+                    "type": "error",
+                    "detail": "El agente tardó demasiado en responder.",
+                }
             )
-        except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=504, detail="El agente tardó demasiado en responder.")
+            return
 
         duration_ms = int((time.time() - started) * 1000)
 
-        if completed.returncode != 0:
-            logger.error(
-                "claude subprocess failed (code=%s) stderr=%s",
-                completed.returncode,
-                completed.stderr,
-            )
-            raise HTTPException(
-                status_code=500,
-                detail="Error al ejecutar el agente. Revisá que la cuenta esté logueada correctamente.",
-            )
+        if return_code != 0:
+            stderr = await self._read_stderr(process)
+            logger.error("claude subprocess failed (code=%s) stderr=%s", return_code, stderr)
+            yield self._sse({"type": "error", "detail": GENERIC_AGENT_ERROR})
+            return
 
-        try:
-            reply, logs, parsed_session_id = self._parse_stream_json(completed.stdout)
-        except ValueError:
-            logger.exception("Failed to parse claude stream-json stdout=%r", completed.stdout[:2000])
-            raise HTTPException(
-                status_code=500,
-                detail="Error al ejecutar el agente. Revisá que la cuenta esté logueada correctamente.",
-            )
+        if not session_id:
+            logger.error("No session_id found in claude stream")
+            yield self._sse({"type": "error", "detail": GENERIC_AGENT_ERROR})
+            return
 
-        if not reply.strip():
-            logger.error("Empty reply from claude stdout=%r stderr=%r", completed.stdout[:2000], completed.stderr)
-            raise HTTPException(
-                status_code=500,
-                detail="Error al ejecutar el agente. Revisá que la cuenta esté logueada correctamente.",
-            )
+        if not text_chunks_received:
+            logger.error("No text chunks received from claude stream")
+            yield self._sse({"type": "error", "detail": GENERIC_AGENT_ERROR})
+            return
 
-        return GenerateResponse(
-            reply=reply,
-            logs=logs,
-            duration_ms=duration_ms,
-            session_id=parsed_session_id,
+        yield self._sse(
+            {
+                "type": "done",
+                "session_id": session_id,
+                "duration_ms": duration_ms,
+            }
         )
 
     async def _build_lead_context(
@@ -178,76 +260,35 @@ class ClaudeRunnerServices:
             "sonnet",
         ]
 
-    def _parse_stream_json(self, stdout: str) -> tuple[str, list[str], str]:
-        """
-        Parsea NDJSON de `claude -p ... --output-format stream-json`.
+    def _events_from_ndjson_event(self, event: dict) -> list[dict]:
+        events: list[dict] = []
+        event_type = event.get("type")
 
-        Formato observado/documentado (Claude Code stream-json):
-        - type=assistant: message.content[] con text y/o tool_use
-        - type=tool_use: evento top-level (algunas versiones)
-        - type=result: campo `result` con la respuesta final (subtype success)
-        """
-        logs: list[str] = []
-        assistant_text_chunks: list[str] = []
-        final_result: str | None = None
-        session_id: str | None = None
-        parsed_any = False
+        if event_type == "assistant":
+            message = event.get("message") or {}
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "tool_use":
+                    events.append({"type": "log", "value": self._tool_use_to_log(block)})
+                elif block_type == "text":
+                    text = block.get("text") or ""
+                    if text:
+                        events.append({"type": "text_chunk", "value": text})
 
-        for raw_line in stdout.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
+        elif event_type == "tool_use":
+            events.append({"type": "log", "value": self._tool_use_to_log(event)})
 
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        elif event_type == "stream_event":
+            inner = event.get("event") or {}
+            delta = inner.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text") or ""
+                if text:
+                    events.append({"type": "text_chunk", "value": text})
 
-            parsed_any = True
-            event_type = event.get("type")
-
-            event_session_id = event.get("session_id")
-            if isinstance(event_session_id, str) and event_session_id.strip():
-                session_id = event_session_id
-
-            if event_type == "assistant":
-                message = event.get("message") or {}
-                for block in message.get("content") or []:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = block.get("type")
-                    if block_type == "tool_use":
-                        log_line = self._tool_use_to_log(block)
-                        if log_line not in logs:
-                            logs.append(log_line)
-                    elif block_type == "text":
-                        text = (block.get("text") or "").strip()
-                        if text:
-                            assistant_text_chunks.append(text)
-
-            elif event_type == "tool_use":
-                log_line = self._tool_use_to_log(event)
-                if log_line not in logs:
-                    logs.append(log_line)
-
-            elif event_type == "result":
-                subtype = event.get("subtype")
-                if event.get("is_error"):
-                    error_msg = event.get("error") or event.get("result") or "Error desconocido"
-                    raise ValueError(f"Claude result error: {error_msg}")
-                if subtype in ("success", "completion", None):
-                    result_text = event.get("result")
-                    if isinstance(result_text, str) and result_text.strip():
-                        final_result = result_text
-
-        if not parsed_any:
-            raise ValueError("No se encontraron eventos JSON en stdout")
-
-        if not session_id:
-            raise ValueError("No se encontró session_id en stdout")
-
-        reply = final_result if final_result is not None else "\n\n".join(assistant_text_chunks)
-        return reply.strip(), logs, session_id
+        return events
 
     @staticmethod
     def _tool_use_to_log(block: dict) -> str:
@@ -261,3 +302,21 @@ class ClaudeRunnerServices:
                     return f"Leyendo {Path(value).name}"
 
         return str(tool_name)
+
+    @staticmethod
+    def _sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    @staticmethod
+    async def _read_stderr(process: asyncio.subprocess.Process) -> str:
+        if process.stderr is None:
+            return ""
+        data = await process.stderr.read()
+        return data.decode(errors="replace")
+
+    @staticmethod
+    async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        process.kill()
+        await process.wait()
